@@ -17,6 +17,40 @@ class HebbNeuron:
             self.weights += y * x
             self.bias += y
 
+first_letter_name_matrix = np.array([
+    [ 1, -1, -1, -1, -1,  1],
+    [ 1, -1, -1, -1,  1,  1],
+    [ 1, -1, -1,  1, -1,  1],
+    [ 1, -1,  1, -1, -1,  1],
+    [ 1,  1, -1, -1, -1,  1],
+    [ 1, -1, -1, -1, -1,  1]
+])
+
+first_letter_lastname_matrix = np.array([
+    [ 1,  1,  1,  1,  1,  1],
+    [-1, -1, -1, -1,  1, -1],
+    [-1, -1, -1,  1, -1, -1],
+    [-1, -1, -1, -1,  1, -1],
+    [-1, -1, -1, -1,  1, -1],
+    [ 1,  1,  1,  1,  1,  1]
+])
+
+X = np.array([
+    first_letter_name_matrix.flatten(),
+    first_letter_lastname_matrix.flatten()
+])
+y = np.array([1, -1])
+
+neuron = HebbNeuron(X.shape[1])
+neuron.train(X, y)
+
+print("Предсказание для буквы И:", neuron.predict(X[0]))
+print("Предсказание для буквы З:", neuron.predict(X[1]))
+
+# ---------- Проверим зашумлённую 'И' ----------
+noisy_И = X[0].copy()
+noisy_И[5] = -noisy_И[5]  # инвертируем одну клетку
+print("Предсказание для зашумлённой И:", neuron.predict(noisy_И))
 
 class App(tk.Tk):
     def __init__(self):
