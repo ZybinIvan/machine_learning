@@ -3,539 +3,558 @@ from tkinter import ttk, messagebox
 import numpy as np
 import json
 import os
-import threading
-from dataclasses import dataclass
+from datetime import datetime
 
-# ----------------- Константы и классы -----------------
 
-GRID_N = 16
-CLASSES = ['+', '-', '/', '*', '√', '%']
-CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
-DATASET_PATH = "dataset.json"  # файл датасета по умолчанию
+class NeuralNetwork:
+    """Нейронная сеть с обратным распространением ошибки"""
 
-CELL = 22  # размеры визуальной клетки на Canvas
+    def __init__(self, input_size, hidden_size, output_size, learning_rate=0.1):
+        """
+        Инициализация нейронной сети
 
-def sigmoid(x):
-    x = np.clip(x, -50, 50)
-    return 1.0 / (1.0 + np.exp(-x))
+        Args:
+            input_size: количество входных нейронов (16*16 = 256)
+            hidden_size: количество нейронов скрытого слоя (8)
+            output_size: количество выходных нейронов (количество классов)
+            learning_rate: норма обучения
+        """
+        self.input_size = input_size
+        self.hidden_size = hidden_size
+        self.output_size = output_size
+        self.learning_rate = learning_rate
 
-@dataclass
-class MLPConfig:
-    input_size: int = GRID_N * GRID_N
-    hidden_size: int = 8
-    output_size: int = len(CLASSES)
-    lr: float = 0.1
-    seed: int | None = 42
+        # Инициализация весов случайными значениями
+        # Веса между входным и скрытым слоем
+        self.weights_input_hidden = np.random.randn(self.input_size, self.hidden_size) * 0.5
+        # Веса между скрытым и выходным слоем
+        self.weights_hidden_output = np.random.randn(self.hidden_size, self.output_size) * 0.5
 
-class MLP:
-    def __init__(self, cfg: MLPConfig):
-        if cfg.seed is not None:
-            np.random.seed(cfg.seed)
-        self.W1 = np.random.randn(cfg.input_size, cfg.hidden_size) * np.sqrt(2.0 / (cfg.input_size + cfg.hidden_size))
-        self.b1 = np.zeros((1, cfg.hidden_size))
-        self.W2 = np.random.randn(cfg.hidden_size, cfg.output_size) * np.sqrt(2.0 / (cfg.hidden_size + cfg.output_size))
-        self.b2 = np.zeros((1, cfg.output_size))
-        self.lr = cfg.lr
+        # Смещения
+        self.bias_hidden = np.zeros((1, self.hidden_size))
+        self.bias_output = np.zeros((1, self.output_size))
+
+    def sigmoid(self, x):
+        """Сигмоидальная функция активации"""
+        return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+    def sigmoid_derivative(self, x):
+        """Производная сигмоидальной функции"""
+        return x * (1 - x)
 
     def forward(self, X):
-        z1 = X @ self.W1 + self.b1
-        a1 = sigmoid(z1)
-        z2 = a1 @ self.W2 + self.b2
-        a2 = sigmoid(z2)
-        return a1, a2
+        """
+        Прямое распространение
 
-    def predict_proba(self, X):
-        _, a2 = self.forward(X)
-        return a2  # вероятности по каждому выходу (сигмоида)
+        Args:
+            X: входные данные
+
+        Returns:
+            output: выход сети
+        """
+        # Вход -> скрытый слой
+        self.hidden_input = np.dot(X, self.weights_input_hidden) + self.bias_hidden
+        self.hidden_output = self.sigmoid(self.hidden_input)
+
+        # Скрытый слой -> выходной слой
+        self.final_input = np.dot(self.hidden_output, self.weights_hidden_output) + self.bias_output
+        self.final_output = self.sigmoid(self.final_input)
+
+        return self.final_output
+
+    def backward(self, X, y, output):
+        """
+        Обратное распространение ошибки
+
+        Args:
+            X: входные данные
+            y: целевые значения
+            output: выход сети
+        """
+        # Вычисление ошибки на выходном слое
+        output_error = y - output
+        output_delta = output_error * self.sigmoid_derivative(output)
+
+        # Вычисление ошибки на скрытом слое
+        hidden_error = output_delta.dot(self.weights_hidden_output.T)
+        hidden_delta = hidden_error * self.sigmoid_derivative(self.hidden_output)
+
+        # Обновление весов и смещений
+        self.weights_hidden_output += self.hidden_output.T.dot(output_delta) * self.learning_rate
+        self.bias_output += np.sum(output_delta, axis=0, keepdims=True) * self.learning_rate
+        self.weights_input_hidden += X.T.dot(hidden_delta) * self.learning_rate
+        self.bias_hidden += np.sum(hidden_delta, axis=0, keepdims=True) * self.learning_rate
+
+    def train(self, X, y, epochs):
+        """
+        Обучение сети
+
+        Args:
+            X: обучающие данные
+            y: целевые значения
+            epochs: количество эпох обучения
+
+        Returns:
+            losses: список значений ошибки для каждой эпохи
+        """
+        losses = []
+        for epoch in range(epochs):
+            # Прямое распространение
+            output = self.forward(X)
+
+            # Обратное распространение
+            self.backward(X, y, output)
+
+            # Вычисление ошибки
+            loss = np.mean(np.square(y - output))
+            losses.append(loss)
+
+        return losses
 
     def predict(self, X):
-        proba = self.predict_proba(X)
-        return np.argmax(proba, axis=1), proba
+        """
+        Предсказание класса
 
-    def train(self, X, Y, epochs=500, lr=None, callback=None, stop_flag=None):
-        if lr is not None:
-            self.lr = lr
-        N = X.shape[0]
-        for ep in range(1, epochs + 1):
-            if stop_flag and stop_flag.is_set():
-                break
-            a1, y_hat = self.forward(X)
-            loss = np.mean((y_hat - Y) ** 2)
+        Args:
+            X: входные данные
 
-            delta2 = (y_hat - Y) * (y_hat * (1.0 - y_hat))
-            grad_W2 = (a1.T @ delta2) / N
-            grad_b2 = np.mean(delta2, axis=0, keepdims=True)
+        Returns:
+            Индекс класса с максимальной вероятностью
+        """
+        output = self.forward(X)
+        return np.argmax(output, axis=1)
 
-            delta1 = (delta2 @ self.W2.T) * (a1 * (1.0 - a1))
-            grad_W1 = (X.T @ delta1) / N
-            grad_b1 = np.mean(delta1, axis=0, keepdims=True)
-
-            self.W2 -= self.lr * grad_W2
-            self.b2 -= self.lr * grad_b2
-            self.W1 -= self.lr * grad_W1
-            self.b1 -= self.lr * grad_b1
-
-            if callback:
-                callback(ep, float(loss))
-
-    def save_weights(self, path):
-        weights = {
-            "W1": self.W1.tolist(),
-            "b1": self.b1.tolist(),
-            "W2": self.W2.tolist(),
-            "b2": self.b2.tolist(),
-            "lr": self.lr,
-            "input_size": GRID_N * GRID_N,
-            "hidden_size": self.W1.shape[1],
-            "output_size": self.W2.shape[1],
+    def save_model(self, filename):
+        """Сохранение модели в файл"""
+        model_data = {
+            'weights_input_hidden': self.weights_input_hidden.tolist(),
+            'weights_hidden_output': self.weights_hidden_output.tolist(),
+            'bias_hidden': self.bias_hidden.tolist(),
+            'bias_output': self.bias_output.tolist(),
+            'input_size': self.input_size,
+            'hidden_size': self.hidden_size,
+            'output_size': self.output_size,
+            'learning_rate': self.learning_rate
         }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(weights, f, ensure_ascii=False, indent=2)
+        with open(filename, 'w') as f:
+            json.dump(model_data, f)
 
-    def load_weights(self, path):
-        with open(path, "r", encoding="utf-8") as f:
-            w = json.load(f)
-        assert w["input_size"] == GRID_N * GRID_N
-        assert w["hidden_size"] == self.W1.shape[1]
-        assert w["output_size"] == self.W2.shape[1]
-        self.W1 = np.array(w["W1"], dtype=float)
-        self.b1 = np.array(w["b1"], dtype=float)
-        self.W2 = np.array(w["W2"], dtype=float)
-        self.b2 = np.array(w["b2"], dtype=float)
-        self.lr = float(w.get("lr", self.lr))
+    def load_model(self, filename):
+        """Загрузка модели из файла"""
+        with open(filename, 'r') as f:
+            model_data = json.load(f)
 
-# ----------------- Вспомогательные генераторы символов -----------------
+        self.weights_input_hidden = np.array(model_data['weights_input_hidden'])
+        self.weights_hidden_output = np.array(model_data['weights_hidden_output'])
+        self.bias_hidden = np.array(model_data['bias_hidden'])
+        self.bias_output = np.array(model_data['bias_output'])
+        self.input_size = model_data['input_size']
+        self.hidden_size = model_data['hidden_size']
+        self.output_size = model_data['output_size']
+        self.learning_rate = model_data['learning_rate']
 
-def empty_grid():
-    return np.zeros((GRID_N, GRID_N), dtype=float)
 
-def draw_hline(g, row, c0, c1):
-    c0, c1 = max(0, c0), min(GRID_N-1, c1)
-    g[row, c0:c1+1] = 1.0
+class PatternRecognitionApp:
+    """Главное приложение для распознавания образов"""
 
-def draw_vline(g, col, r0, r1):
-    r0, r1 = max(0, r0), min(GRID_N-1, r1)
-    g[r0:r1+1, col] = 1.0
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Распознавание арифметических операций")
+        self.root.geometry("1100x800")
 
-def draw_diag(g, start, end):
-    # Брезенхем (упрощённый) для тонкой линии
-    r0, c0 = start
-    r1, c1 = end
-    dr = 1 if r1 >= r0 else -1
-    dc = 1 if c1 >= c0 else -1
-    r, c = r0, c0
-    while True:
-        if 0 <= r < GRID_N and 0 <= c < GRID_N:
-            g[r, c] = 1.0
-        if r == r1 and c == c1:
-            break
-        if abs((r+dr)-r0) * abs(c1-c0) < abs((c+dc)-c0) * abs(r1-r0):
-            r += dr
-        else:
-            c += dc
+        # Параметры
+        self.grid_size = 16
+        self.cell_size = 40
+        self.canvas_size = self.grid_size * self.cell_size
 
-def template_plus():
-    g = empty_grid()
-    mid = GRID_N // 2
-    draw_hline(g, mid, 3, GRID_N-4)
-    draw_vline(g, mid, 3, GRID_N-4)
-    return g
+        # Матрица для хранения текущего рисунка
+        self.grid = np.zeros((self.grid_size, self.grid_size))
 
-def template_minus():
-    g = empty_grid()
-    mid = GRID_N // 2
-    draw_hline(g, mid, 2, GRID_N-3)
-    return g
+        # Хардкод базовых паттернов арифметических операций
+        self.base_patterns = self.create_base_patterns()
 
-def template_slash():
-    g = empty_grid()
-    # диагональ /
-    draw_diag(g, (GRID_N-3, 2), (2, GRID_N-3))
-    return g
+        # Нейронная сеть
+        self.nn = None
 
-def template_star():
-    g = empty_grid()
-    mid = GRID_N // 2
-    draw_hline(g, mid, 3, GRID_N-4)
-    draw_vline(g, mid, 3, GRID_N-4)
-    draw_diag(g, (3, 3), (GRID_N-4, GRID_N-4))
-    draw_diag(g, (GRID_N-4, 3), (3, GRID_N-4))
-    return g
+        # Режим работы
+        self.mode = tk.StringVar(value="draw")  # "draw" или "recognize"
 
-def template_sqrt():
-    g = empty_grid()
-    # галочка √
-    draw_diag(g, (4, 6), (10, 9))
-    draw_diag(g, (10, 9), (4, 13))
-    return g
+        # Файлы для датасетов
+        self.drawn_dataset_file = "drawn_dataset.json"
+        self.generated_dataset_file = "generated_dataset.json"
 
-def template_percent():
-    g = empty_grid()
-    # диагональ %
-    draw_diag(g, (GRID_N-3, 3), (3, GRID_N-4))
-    # две точки (2x2)
-    g[3:5, 3:5] = 1.0
-    g[GRID_N-5:GRID_N-3, GRID_N-5:GRID_N-3] = 1.0
-    return g
+        # Создание интерфейса
+        self.create_widgets()
 
-TEMPLATES = {
-    '+': template_plus,
-    '-': template_minus,
-    '/': template_slash,
-    '*': template_star,
-    '√': template_sqrt,
-    '%': template_percent,
-}
+        # Загрузка датасетов если они существуют
+        self.load_datasets()
 
-def translate_grid(g, dx, dy):
-    out = np.zeros_like(g)
-    r0 = max(0, dy)
-    r1 = min(GRID_N, GRID_N + dy)
-    c0 = max(0, dx)
-    c1 = min(GRID_N, GRID_N + dx)
-    out[r0:r1, c0:c1] = g[r0 - dy:r1 - dy, c0 - dx:c1 - dx]
-    return out
+    def create_base_patterns(self):
+        """Создание базовых паттернов арифметических операций"""
+        patterns = {}
 
-def thicken(g, iters=1):
-    out = g.copy()
-    for _ in range(iters):
-        idx = np.argwhere(out > 0.5)
-        for (r, c) in idx:
-            for rr, cc in [(r-1,c),(r+1,c),(r,c-1),(r,c+1)]:
-                if 0 <= rr < GRID_N and 0 <= cc < GRID_N:
-                    out[rr, cc] = 1.0
-    return out
+        # Плюс (+)
+        plus = np.zeros((16, 16))
+        plus[7:9, 3:13] = 1  # горизонтальная линия
+        plus[3:13, 7:9] = 1  # вертикальная линия
+        patterns['+'] = plus
 
-def jitter_template(base):
-    g = base.copy()
-    # случайное смещение -1..1 по каждой оси
-    dx = np.random.randint(-1, 2)
-    dy = np.random.randint(-1, 2)
-    g = translate_grid(g, dx, dy)
-    # небольшое утолщение
-    if np.random.rand() < 0.7:
-        g = thicken(g, iters=np.random.randint(1, 3))
-    # легкий шум включений рядом
-    ones = np.argwhere(g > 0.5)
-    for (r, c) in ones[np.random.choice(len(ones), size=max(1, len(ones)//10), replace=False)] if len(ones) else []:
-        for rr, cc in [(r-1,c-1),(r-1,c+1),(r+1,c-1),(r+1,c+1)]:
-            if 0 <= rr < GRID_N and 0 <= cc < GRID_N and np.random.rand() < 0.3:
-                g[rr, cc] = 1.0
-    return g
+        # Минус (-)
+        minus = np.zeros((16, 16))
+        minus[7:9, 3:13] = 1  # горизонтальная линия
+        patterns['-'] = minus
 
-# ----------------- Приложение (Tkinter GUI) -----------------
+        # Умножение (*)
+        multiply = np.zeros((16, 16))
+        for i in range(4, 12):
+            multiply[i, i] = 1  # диагональ \\
+            multiply[i, 15 - i] = 1  # диагональ /
+        multiply[7:9, 5:11] = 1  # горизонтальная
+        multiply[5:11, 7:9] = 1  # вертикальная
+        patterns['*'] = multiply
 
-class App(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("Распознавание образов — Арифметические операции")
-        self.resizable(False, False)
+        # Деление (/)
+        divide = np.zeros((16, 16))
+        for i in range(3, 13):
+            j = 15 - i
+            if 0 <= j < 16:
+                divide[i, j] = 1
+        patterns['/'] = divide
 
-        self.grid_data = np.zeros((GRID_N, GRID_N), dtype=float)
-        self.drawing = False
-        self.erasing = False
-        self.current_label = CLASSES[0]
+        # Корень (√)
+        sqrt = np.zeros((16, 16))
+        sqrt[10:14, 3:5] = 1  # левая часть
+        sqrt[7:11, 5:7] = 1  # средняя часть
+        sqrt[3:8, 7:9] = 1  # правая часть вверх
+        sqrt[3:5, 7:14] = 1  # горизонтальная часть
+        patterns['V'] = sqrt
 
-        self.samples_X: list[list[float]] = []
-        self.samples_y: list[int] = []
+        # Процент (%)
+        percent = np.zeros((16, 16))
+        # Верхний кружок
+        percent[3:6, 3:6] = 1
+        percent[4, 4] = 0
+        # Нижний кружок
+        percent[10:13, 10:13] = 1
+        percent[11, 11] = 0
+        # Диагональ
+        for i in range(3, 13):
+            j = 15 - i
+            if 0 <= j < 16:
+                percent[i, j] = 1
+        patterns['%'] = percent
 
-        self.model = MLP(MLPConfig())
+        equal = np.zeros((16, 16))
+        equal[7, 2:14] = 1
+        equal[9, 2:14] = 1
+        patterns['='] = equal
 
-        # Параметры обучения
-        self.lr_var = tk.StringVar(value="0.1")
-        self.epochs_var = tk.StringVar(value="500")
-        self.hidden_layers_var = tk.StringVar(value="1")  # должно быть 1
+        # остальное без изменений
+        return patterns
 
-        # Параметры генерации
-        self.gen_count_var = tk.StringVar(value="20")
+    def create_widgets(self):
+        # Фрейм для холста (canvas) — первый столбец
+        canvas_frame = ttk.LabelFrame(self.root, text="Область рисования 16x16", padding=10)
+        canvas_frame.grid(row=0, column=0, padx=10, pady=10, rowspan=3, sticky='n')
 
-        self._build_ui()
-        self.stop_flag = threading.Event()
+        # Холст для рисования
+        self.canvas = tk.Canvas(canvas_frame, width=self.canvas_size, height=self.canvas_size,
+                                bg='white', cursor='cross')
+        self.canvas.pack()
 
-    def _build_ui(self):
-        left = ttk.Frame(self)
-        left.grid(row=0, column=0, padx=10, pady=10)
+        # Сетка
+        for i in range(self.grid_size + 1):
+            self.canvas.create_line(i * self.cell_size, 0,
+                                    i * self.cell_size, self.canvas_size,
+                                    fill='lightgray')
+            self.canvas.create_line(0, i * self.cell_size,
+                                    self.canvas_size, i * self.cell_size,
+                                    fill='lightgray')
 
-        right = ttk.Frame(self)
-        right.grid(row=0, column=1, sticky="ns", padx=10, pady=10)
+        # События мыши
+        self.canvas.bind('<B1-Motion>', self.paint)
+        self.canvas.bind('<Button-1>', self.paint)
 
-        # Canvas 16x16
-        canvas_size = GRID_N * CELL + 1
-        self.canvas = tk.Canvas(left, width=canvas_size, height=canvas_size, bg="white", highlightthickness=1, highlightbackground="#888")
-        self.canvas.grid(row=0, column=0)
-        self._draw_grid()
+        # ------ Второй столбец ------
+        # Фрейм управления
+        control_frame = ttk.LabelFrame(self.root, text="Управление", padding=10)
+        control_frame.grid(row=0, column=1, padx=10, pady=10, sticky='n')
 
-        tools = ttk.Frame(left)
-        tools.grid(row=1, column=0, pady=(8, 0), sticky="w")
+        ttk.Button(control_frame, text="Очистить холст",
+                   command=self.clear_canvas).pack(fill='x', pady=5)
 
-        ttk.Button(tools, text="Очистить", command=self.clear_canvas).grid(row=0, column=0, padx=2)
-        ttk.Button(tools, text="Инвертировать", command=self.invert_canvas).grid(row=0, column=1, padx=2)
+        ttk.Label(control_frame, text="Режим работы:").pack(pady=(10, 5))
+        ttk.Radiobutton(control_frame, text="Рисование и сохранение",
+                        variable=self.mode, value="draw").pack(anchor='w')
+        ttk.Radiobutton(control_frame, text="Распознавание",
+                        variable=self.mode, value="recognize").pack(anchor='w')
 
-        # Обработчики мыши
-        self.canvas.bind("<Button-1>", self.on_lmb_down)
-        self.canvas.bind("<B1-Motion>", self.on_lmb_move)
-        self.canvas.bind("<ButtonRelease-1>", self.on_lmb_up)
+        ttk.Label(control_frame, text="Класс образа:").pack(pady=(10, 5))
+        self.class_var = tk.StringVar(value="+")
+        classes = ['+', '-', '*', '/', 'V', '%', '=']
+        for cls in classes:
+            ttk.Radiobutton(control_frame, text=cls,
+                            variable=self.class_var, value=cls).pack(anchor='w')
 
-        self.canvas.bind("<Button-3>", self.on_rmb_down)
-        self.canvas.bind("<B3-Motion>", self.on_rmb_move)
-        self.canvas.bind("<ButtonRelease-3>", self.on_rmb_up)
+        ttk.Button(control_frame, text="Сохранить рисунок",
+                   command=self.save_drawn_pattern).pack(fill='x', pady=5)
 
-        # Классы
-        cls_box = ttk.LabelFrame(right, text="Класс")
-        cls_box.grid(row=0, column=0, sticky="ew", pady=5)
-        row, col = 0, 0
-        for c in CLASSES:
-            b = ttk.Button(cls_box, text=c, command=lambda cc=c: self.set_label(cc), width=4)
-            b.grid(row=row, column=col, padx=2, pady=2)
-            col += 1
-            if col == 6:
-                row += 1
-                col = 0
-        self.label_var = tk.StringVar(value=f"Текущий класс: {self.current_label}")
-        ttk.Label(cls_box, textvariable=self.label_var).grid(row=2, column=0, columnspan=6, sticky="w", padx=4, pady=2)
+        # Фрейм обучения
+        train_frame = ttk.LabelFrame(self.root, text="Обучение сети", padding=10)
+        train_frame.grid(row=1, column=1, padx=10, pady=10, sticky='n')
 
-        # Датасет
-        ds_box = ttk.LabelFrame(right, text="Датасет")
-        ds_box.grid(row=1, column=0, sticky="ew", pady=5)
-        ttk.Button(ds_box, text="Добавить в датасет", command=self.add_sample).grid(row=0, column=0, padx=2, pady=2)
-        ttk.Label(ds_box, text=f"Файл: {DATASET_PATH}").grid(row=0, column=1, columnspan=2, sticky="w", padx=6)
+        ttk.Label(train_frame, text="Норма обучения:").pack()
+        self.learning_rate_var = tk.DoubleVar(value=0.1)
+        ttk.Entry(train_frame, textvariable=self.learning_rate_var, width=15).pack(pady=5)
+        ttk.Label(train_frame, text="Количество эпох:").pack()
+        self.epochs_var = tk.IntVar(value=1000)
+        ttk.Entry(train_frame, textvariable=self.epochs_var, width=15).pack(pady=5)
+        ttk.Button(train_frame, text="Генерировать датасет",
+                   command=self.generate_dataset).pack(fill='x', pady=5)
+        ttk.Button(train_frame, text="Обучить сеть",
+                   command=self.train_network).pack(fill='x', pady=5)
+        ttk.Button(train_frame, text="Распознать образ",
+                   command=self.recognize_pattern).pack(fill='x', pady=5)
 
-        ttk.Label(ds_box, text="Сгенерировать (на класс):").grid(row=1, column=0, sticky="w")
-        ttk.Entry(ds_box, textvariable=self.gen_count_var, width=8).grid(row=1, column=1, sticky="w")
-        ttk.Button(ds_box, text="Сгенерировать датасет", command=self.generate_dataset).grid(row=1, column=2, padx=2, pady=2)
+        # ------ Третий столбец ------
+        dataset_frame = ttk.LabelFrame(self.root, text="Управление датасетами", padding=10)
+        dataset_frame.grid(row=0, column=2, padx=10, pady=10, rowspan=2, sticky='n')
 
-        self.ds_count_var = tk.StringVar(value="Примеров (в памяти): 0")
-        ttk.Label(ds_box, textvariable=self.ds_count_var).grid(row=2, column=0, columnspan=3, sticky="w", padx=4, pady=2)
+        ttk.Button(dataset_frame, text="Очистить нарисованные",
+                   command=self.clear_drawn_dataset).pack(fill='x', pady=5)
+        ttk.Button(dataset_frame, text="Очистить сгенерированные",
+                   command=self.clear_generated_dataset).pack(fill='x', pady=5)
+        ttk.Button(dataset_frame, text="Очистить оба датасета",
+                   command=self.clear_all_datasets).pack(fill='x', pady=5)
+        self.info_label = ttk.Label(dataset_frame, text="", justify='left')
+        self.info_label.pack(pady=10)
 
-        # Обучение
-        train_box = ttk.LabelFrame(right, text="Обучение")
-        train_box.grid(row=2, column=0, sticky="ew", pady=5)
-        ttk.Label(train_box, text="Норма обучения:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(train_box, textvariable=self.lr_var, width=8).grid(row=0, column=1, sticky="w", padx=4)
-        ttk.Label(train_box, text="Эпохи:").grid(row=0, column=2, sticky="w")
-        ttk.Entry(train_box, textvariable=self.epochs_var, width=8).grid(row=0, column=3, sticky="w", padx=4)
-        ttk.Label(train_box, text="Скрытых слоёв (1):").grid(row=1, column=0, columnspan=1, sticky="w", pady=2)
-        ttk.Entry(train_box, textvariable=self.hidden_layers_var, width=8).grid(row=1, column=1, sticky="w", padx=4)
+        self.update_info()
 
-        ttk.Button(train_box, text="Обучить сеть", command=self.start_training).grid(row=2, column=0, padx=2, pady=4, sticky="w")
-        ttk.Button(train_box, text="Остановить", command=self.stop_training).grid(row=2, column=1, padx=2, pady=4, sticky="w")
-        ttk.Button(train_box, text="Сохранить веса", command=self.save_weights).grid(row=2, column=2, padx=2, pady=4, sticky="w")
-        ttk.Button(train_box, text="Загрузить веса", command=self.load_weights).grid(row=2, column=3, padx=2, pady=4, sticky="w")
-
-        self.status_var = tk.StringVar(value="Статус: готово")
-        ttk.Label(train_box, textvariable=self.status_var).grid(row=3, column=0, columnspan=4, sticky="w")
-
-        # Распознавание
-        infer_box = ttk.LabelFrame(right, text="Распознавание")
-        infer_box.grid(row=3, column=0, sticky="ew", pady=5)
-        ttk.Button(infer_box, text="Предсказать", command=self.predict_current).grid(row=0, column=0, padx=2, pady=4)
-        self.pred_var = tk.StringVar(value="Предсказание: —")
-        ttk.Label(infer_box, textvariable=self.pred_var).grid(row=0, column=1, padx=6, sticky="w")
-
-        ttk.Label(infer_box, text="Вероятности:").grid(row=1, column=0, sticky="w")
-        self.prob_box = tk.Text(infer_box, width=24, height=7)
-        self.prob_box.grid(row=2, column=0, columnspan=2, padx=2, pady=2)
-        self.prob_box.configure(state="disabled")
-
-    # ---------- Рисование ----------
-    def _draw_grid(self):
-        self.canvas.delete("all")
-        for i in range(GRID_N):
-            for j in range(GRID_N):
-                x0 = j * CELL + 1
-                y0 = i * CELL + 1
-                x1 = x0 + CELL - 2
-                y1 = y0 + CELL - 2
-                val = self.grid_data[i, j]
-                fill = "black" if val > 0.5 else "white"
-                self.canvas.create_rectangle(x0, y0, x1, y1, fill=fill, outline="#ddd", tags=f"cell-{i}-{j}")
-
-    def _update_cell(self, i, j):
-        fill = "black" if self.grid_data[i, j] > 0.5 else "white"
-        items = self.canvas.find_withtag(f"cell-{i}-{j}")
-        if items:
-            self.canvas.itemconfig(items[0], fill=fill)
-
-    def set_cell(self, event, value):
+    def paint(self, event):
+        """Рисование на холсте"""
         x, y = event.x, event.y
-        j = x // CELL
-        i = y // CELL
-        if 0 <= i < GRID_N and 0 <= j < GRID_N:
-            self.grid_data[i, j] = value
-            self._update_cell(i, j)
+        col = x // self.cell_size
+        row = y // self.cell_size
 
-    def on_lmb_down(self, event):
-        self.drawing = True
-        self.set_cell(event, 1.0)
-
-    def on_lmb_move(self, event):
-        if self.drawing:
-            self.set_cell(event, 1.0)
-
-    def on_lmb_up(self, event):
-        self.drawing = False
-
-    def on_rmb_down(self, event):
-        self.erasing = True
-        self.set_cell(event, 0.0)
-
-    def on_rmb_move(self, event):
-        if self.erasing:
-            self.set_cell(event, 0.0)
-
-    def on_rmb_up(self, event):
-        self.erasing = False
+        if 0 <= row < self.grid_size and 0 <= col < self.grid_size:
+            self.grid[row, col] = 1
+            x1 = col * self.cell_size
+            y1 = row * self.cell_size
+            x2 = x1 + self.cell_size
+            y2 = y1 + self.cell_size
+            self.canvas.create_rectangle(x1, y1, x2, y2, fill='black', outline='')
 
     def clear_canvas(self):
-        self.grid_data[:, :] = 0.0
-        self._draw_grid()
+        """Очистка холста"""
+        self.grid = np.zeros((self.grid_size, self.grid_size))
+        self.canvas.delete('all')
 
-    def invert_canvas(self):
-        self.grid_data = 1.0 - self.grid_data
-        self._draw_grid()
+        # Перерисовка сетки
+        for i in range(self.grid_size + 1):
+            self.canvas.create_line(i * self.cell_size, 0,
+                                    i * self.cell_size, self.canvas_size,
+                                    fill='lightgray')
+            self.canvas.create_line(0, i * self.cell_size,
+                                    self.canvas_size, i * self.cell_size,
+                                    fill='lightgray')
 
-    def set_label(self, c):
-        self.current_label = c
-        self.label_var.set(f"Текущий класс: {self.current_label}")
+    def save_drawn_pattern(self):
+        """Сохранение нарисованного паттерна"""
+        if np.sum(self.grid) == 0:
+            messagebox.showwarning("Предупреждение", "Холст пуст!")
+            return
 
-    # ---------- Датасет ----------
-    def grid_to_vector(self):
-        return self.grid_data.reshape(-1).astype(float).tolist()
+        pattern_class = self.class_var.get()
 
-    def ensure_dataset_file(self):
-        if not os.path.exists(DATASET_PATH):
-            data = {"classes": CLASSES, "X": [], "y": []}
-            with open(DATASET_PATH, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            return data
-        else:
-            with open(DATASET_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+        # Загрузка существующего датасета
+        drawn_dataset = []
+        if os.path.exists(self.drawn_dataset_file):
+            with open(self.drawn_dataset_file, 'r') as f:
+                drawn_dataset = json.load(f)
 
-    def append_to_dataset_file(self, x_vec, y_idx):
-        data = self.ensure_dataset_file()
-        # проверка совместимости классов
-        if data.get("classes") != CLASSES:
-            raise ValueError("Список классов в файле датасета несовместим")
-        data["X"].append(x_vec)
-        data["y"].append(int(y_idx))
-        with open(DATASET_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        # Добавление нового паттерна
+        drawn_dataset.append({
+            'pattern': self.grid.tolist(),
+            'class': pattern_class,
+            'timestamp': datetime.now().isoformat()
+        })
 
-    def add_sample(self):
-        x = self.grid_to_vector()
-        y = CLASS_TO_IDX[self.current_label]
-        self.samples_X.append(x)
-        self.samples_y.append(y)
-        try:
-            self.append_to_dataset_file(x, y)
-            messagebox.showinfo("Датасет", f"Добавлен пример класса '{self.current_label}' в {DATASET_PATH}")
-        except Exception as e:
-            messagebox.showerror("Датасет", f"Ошибка записи: {e}")
-        self.ds_count_var.set(f"Примеров (в памяти): {len(self.samples_X)}")
+        # Сохранение
+        with open(self.drawn_dataset_file, 'w') as f:
+            json.dump(drawn_dataset, f, indent=2)
+
+        messagebox.showinfo("Успех", f"Паттерн '{pattern_class}' сохранен!")
+        self.update_info()
+        self.clear_canvas()
 
     def generate_dataset(self):
-        try:
-            n = int(self.gen_count_var.get())
-            if n <= 0:
-                raise ValueError("n <= 0")
-        except Exception:
-            messagebox.showerror("Генерация", "Некорректное число на класс")
+        """Генерация датасета на основе базовых паттернов с шумом"""
+        samples_per_class = 20  # Количество образцов для каждого класса
+        generated_dataset = []
+
+        for class_name, base_pattern in self.base_patterns.items():
+            for i in range(samples_per_class):
+                # Добавление различных видов шума
+                noisy_pattern = base_pattern.copy()
+
+                # Случайный шум (несколько пикселей)
+                noise_count = np.random.randint(1, 5)
+                for _ in range(noise_count):
+                    r, c = np.random.randint(0, 16, 2)
+                    noisy_pattern[r, c] = 1 - noisy_pattern[r, c]
+
+                # Небольшой сдвиг
+                shift_x = np.random.randint(-1, 2)
+                shift_y = np.random.randint(-1, 2)
+                if shift_x != 0 or shift_y != 0:
+                    noisy_pattern = np.roll(noisy_pattern, shift_x, axis=0)
+                    noisy_pattern = np.roll(noisy_pattern, shift_y, axis=1)
+
+                generated_dataset.append({
+                    'pattern': noisy_pattern.tolist(),
+                    'class': class_name,
+                    'timestamp': datetime.now().isoformat()
+                })
+
+        # Сохранение
+        with open(self.generated_dataset_file, 'w') as f:
+            json.dump(generated_dataset, f, indent=2)
+
+        messagebox.showinfo("Успех",
+                            f"Сгенерировано {len(generated_dataset)} образцов!")
+        self.update_info()
+
+    def load_datasets(self):
+        """Загрузка всех датасетов"""
+        self.drawn_data = []
+        self.generated_data = []
+
+        if os.path.exists(self.drawn_dataset_file):
+            with open(self.drawn_dataset_file, 'r') as f:
+                self.drawn_data = json.load(f)
+
+        if os.path.exists(self.generated_dataset_file):
+            with open(self.generated_dataset_file, 'r') as f:
+                self.generated_data = json.load(f)
+
+    def train_network(self):
+        """Обучение нейронной сети"""
+        self.load_datasets()
+
+        # Объединение датасетов
+        all_data = self.drawn_data + self.generated_data
+
+        if len(all_data) == 0:
+            messagebox.showwarning("Предупреждение",
+                                   "Нет данных для обучения! Создайте датасет.")
             return
-        data = self.ensure_dataset_file()
-        if data.get("classes") != CLASSES:
-            messagebox.showerror("Датасет", "Список классов в файле датасета несовместим")
+
+        # Подготовка данных
+        X = []
+        y = []
+        class_names = ['+', '-', '*', '/', 'V', '%', '=']
+
+        for item in all_data:
+            pattern = np.array(item['pattern']).flatten()
+            X.append(pattern)
+
+            # One-hot encoding
+            class_idx = class_names.index(item['class'])
+            y_vector = np.zeros(len(class_names))
+            y_vector[class_idx] = 1
+            y.append(y_vector)
+
+        X = np.array(X)
+        y = np.array(y)
+
+        # Создание и обучение сети
+        self.nn = NeuralNetwork(
+            input_size=256,  # 16*16
+            hidden_size=8,
+            output_size=len(class_names),
+            learning_rate=self.learning_rate_var.get()
+        )
+
+        epochs = self.epochs_var.get()
+        losses = self.nn.train(X, y, epochs)
+
+        messagebox.showinfo("Успех",
+                            f"Обучение завершено!\nФинальная ошибка: {losses[-1]:.6f}")
+
+    def recognize_pattern(self):
+        if self.nn is None:
+            messagebox.showwarning("Предупреждение", "Сначала обучите сеть!")
             return
-        # генерируем
-        for sym in CLASSES:
-            base = TEMPLATES[sym]()
-            for _ in range(n):
-                g = jitter_template(base)
-                x = g.reshape(-1).astype(float).tolist()
-                y = CLASS_TO_IDX[sym]
-                data["X"].append(x)
-                data["y"].append(int(y))
-                # также добавим в оперативную память
-                self.samples_X.append(x)
-                self.samples_y.append(y)
-        with open(DATASET_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        self.ds_count_var.set(f"Примеров (в памяти): {len(self.samples_X)}")
-        messagebox.showinfo("Генерация", f"Сгенерировано: {n*len(CLASSES)} примеров")
 
-    # ---------- Обучение ----------
-    def start_training(self):
-        if self.hidden_layers_var.get().strip() != "1":
-            messagebox.showerror("Параметры", "Число скрытых слоёв должно быть 1 по условию")
-            return
-        if not self.samples_X:
-            messagebox.showwarning("Данные", "Датасет в памяти пуст")
-            return
-        try:
-            lr = float(self.lr_var.get())
-            epochs = int(self.epochs_var.get())
-        except ValueError:
-            messagebox.showerror("Параметры", "Неверные значения нормы обучения или эпох")
+        if np.sum(self.grid) == 0:
+            messagebox.showwarning("Предупреждение", "Холст пуст!")
             return
 
-        X = np.array(self.samples_X, dtype=float)
-        y_idx = np.array(self.samples_y, dtype=int)
-        Y = np.zeros((len(y_idx), len(CLASSES)), dtype=float)
-        Y[np.arange(len(y_idx)), y_idx] = 1.0
+        X = self.grid.flatten().reshape(1, -1)
+        class_names = list(self.base_patterns.keys())
+        prediction = self.nn.predict(X)[0]
+        output = self.nn.forward(X)[0]
 
-        self.stop_flag.clear()
-        def cb(ep, loss):
-            self.status_var.set(f"Эпоха {ep}/{epochs} | Loss={loss:.6f}")
-            self.update_idletasks()
+        sorted_probs = sorted(zip(class_names, output), key=lambda x: x[1], reverse=True)
 
-        def run():
-            self.status_var.set("Обучение...")
-            self.model.train(X, Y, epochs=epochs, lr=lr, callback=cb, stop_flag=self.stop_flag)
-            self.status_var.set("Остановлено" if self.stop_flag.is_set() else "Готово")
+        result = f"Распознанный класс: {class_names[prediction]}\n\n"
+        for cls, prob in sorted_probs:
+            result += f"{cls}: {prob:.4f}\n"
 
-        threading.Thread(target=run, daemon=True).start()
+        # Создаем новое окно с крупным шрифтом
+        top = tk.Toplevel(self.root)
+        top.title("Результат распознавания")
 
-    def stop_training(self):
-        self.stop_flag.set()
+        label = tk.Label(top, text=result, font=("Arial", 14), justify="left")
+        label.pack(padx=20, pady=20)
 
-    def save_weights(self):
-        from tkinter import filedialog
-        path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
-        if not path:
-            return
-        try:
-            self.model.save_weights(path)
-            messagebox.showinfo("Веса", f"Сохранено: {path}")
-        except Exception as e:
-            messagebox.showerror("Веса", f"Ошибка сохранения: {e}")
+        btn = ttk.Button(top, text="Закрыть", command=top.destroy)
+        btn.pack(pady=(0, 20))
 
-    def load_weights(self):
-        from tkinter import filedialog
-        path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
-        if not path:
-            return
-        try:
-            self.model.load_weights(path)
-            messagebox.showinfo("Веса", f"Загружено: {path}")
-        except Exception as e:
-            messagebox.showerror("Веса", f"Ошибка загрузки: {e}")
+    def clear_drawn_dataset(self):
+        """Очистка датасета нарисованных образов"""
+        if messagebox.askyesno("Подтверждение",
+                               "Удалить все нарисованные образы?"):
+            if os.path.exists(self.drawn_dataset_file):
+                os.remove(self.drawn_dataset_file)
+            self.drawn_data = []
+            self.update_info()
+            messagebox.showinfo("Успех", "Датасет нарисованных образов очищен!")
 
-    # ---------- Предсказание ----------
-    def predict_current(self):
-        x = np.array(self.grid_to_vector(), dtype=float).reshape(1, -1)
-        idx, proba = self.model.predict(x)
-        idx = int(idx[0])
-        probs = proba[0]
-        sym = CLASSES[idx]
-        self.pred_var.set(f"Предсказание: {sym} (p={probs[idx]:.3f})")
-        # показать все вероятности
-        lines = []
-        for i, c in enumerate(CLASSES):
-            lines.append(f"{c}: {probs[i]:.3f}")
-        self.prob_box.configure(state="normal")
-        self.prob_box.delete("1.0", "end")
-        self.prob_box.insert("1.0", "\n".join(lines))
-        self.prob_box.configure(state="disabled")
+    def clear_generated_dataset(self):
+        """Очистка датасета сгенерированных образов"""
+        if messagebox.askyesno("Подтверждение",
+                               "Удалить все сгенерированные образы?"):
+            if os.path.exists(self.generated_dataset_file):
+                os.remove(self.generated_dataset_file)
+            self.generated_data = []
+            self.update_info()
+            messagebox.showinfo("Успех", "Датасет сгенерированных образов очищен!")
+
+    def clear_all_datasets(self):
+        """Очистка всех датасетов"""
+        if messagebox.askyesno("Подтверждение",
+                               "Удалить ВСЕ датасеты?"):
+            if os.path.exists(self.drawn_dataset_file):
+                os.remove(self.drawn_dataset_file)
+            if os.path.exists(self.generated_dataset_file):
+                os.remove(self.generated_dataset_file)
+            self.drawn_data = []
+            self.generated_data = []
+            self.update_info()
+            messagebox.showinfo("Успех", "Все датасеты очищены!")
+
+    def update_info(self):
+        """Обновление информации о датасетах"""
+        self.load_datasets()
+        info = f"Нарисовано: {len(self.drawn_data)}\n"
+        info += f"Сгенерировано: {len(self.generated_data)}\n"
+        info += f"Всего: {len(self.drawn_data) + len(self.generated_data)}"
+        self.info_label.config(text=info)
+
 
 if __name__ == "__main__":
-    App().mainloop()
+    root = tk.Tk()
+    app = PatternRecognitionApp(root)
+    root.mainloop()
